@@ -114,8 +114,6 @@ async def analyze(
     request: Request,
     text: str | None = Form(None),
     file: UploadFile | None = File(None),
-    text: str | None = Form(None),
-    file: UploadFile | None = File(None),
     payload: dict[str, Any] | None = Body(None),
 ) -> JSONResponse:
     if file is not None:
