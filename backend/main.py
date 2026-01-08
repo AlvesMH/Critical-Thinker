@@ -17,7 +17,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
 
 # FIX 1: import prompts from the same directory (matches uploaded prompts.py)
-from app.prompts import AGENT_CONFIGS
+from backend.app.prompts import AGENT_CONFIGS
 
 MAX_TEXT_CHARS = 100_000
 MAX_PDF_BYTES = 10 * 1024 * 1024
