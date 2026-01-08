@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 import httpx
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -98,6 +99,11 @@ async def _run_agents(text: str) -> dict[str, Any]:
     return results
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health_check() -> dict[str, str]:
     return {"status": "ok"}
@@ -105,6 +111,9 @@ async def health_check() -> dict[str, str]:
 
 @app.post("/analyze")
 async def analyze(
+    request: Request,
+    text: str | None = Form(None),
+    file: UploadFile | None = File(None),
     text: str | None = Form(None),
     file: UploadFile | None = File(None),
     payload: dict[str, Any] | None = Body(None),
@@ -121,6 +130,10 @@ async def analyze(
             raise HTTPException(status_code=400, detail="Unable to read PDF text.") from exc
         cleaned = _validate_text(extracted)
     else:
+        if text is None and request.headers.get("content-type", "").startswith("application/json"):
+            payload = await request.json()
+            if isinstance(payload, dict):
+                text = payload.get("text")
         if payload and isinstance(payload, dict) and "text" in payload:
             text = payload.get("text")
         if text is None:
