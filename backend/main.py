@@ -5,6 +5,16 @@ from datetime import datetime
 from typing import Any
 from pathlib import Path
 
+import re
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    PageBreak,
+    Table,
+    TableStyle,
+    HRFlowable,
+    KeepTogether,
+)
+
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -172,62 +182,284 @@ async def analyze(
     return JSONResponse({"analysis": results})
 
 
-def _markdown_to_blocks(markdown_text: str) -> list[Any]:
-    styles = getSampleStyleSheet()
-    normal = styles["BodyText"]
-    normal.spaceAfter = 8
-    heading = ParagraphStyle(
-        "Heading",
-        parent=styles["Heading3"],
-        textColor=colors.HexColor("#1f2937"),
-        spaceBefore=12,
-        spaceAfter=6,
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_MD_BULLET_RE = re.compile(r"^(\s*)([-*])\s+(.*)$")
+
+def _md_inline_to_rl(text: str) -> str:
+    """
+    Convert a small, safe subset of Markdown inline formatting to ReportLab's
+    Paragraph markup (HTML-ish): **bold**, *italic*, `code`.
+    """
+    if not text:
+        return ""
+
+    # Escape basic XML chars first
+    text = (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
     )
 
-    blocks: list[Any] = []
-    lines = markdown_text.splitlines()
-    list_items: list[Any] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("-"):
-            list_items.append(ListItem(Paragraph(stripped[1:].strip(), normal)))
-            continue
+    # Inline code
+    text = re.sub(r"`([^`]+)`", r'<font face="Courier">\1</font>', text)
+
+    # Bold **...**
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
+
+    # Italic *...* (avoid clobbering bullet markers and already-converted tags)
+    text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", text)
+
+    return text
+
+
+def _markdown_to_flowables(markdown_text: str) -> list[Any]:
+    """
+    Convert agent markdown-ish output into a clean flowable list:
+    - headings (#, ##, ###)
+    - paragraphs (reflow wrapped lines)
+    - bullet lists (-, *)
+    """
+    styles = getSampleStyleSheet()
+
+    body = ParagraphStyle(
+        "CTBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10.5,
+        leading=14,
+        spaceAfter=8,
+    )
+    h1 = ParagraphStyle(
+        "CTH1",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=20,
+        spaceBefore=12,
+        spaceAfter=8,
+        textColor=colors.HexColor("#111827"),
+    )
+    h2 = ParagraphStyle(
+        "CTH2",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=16,
+        spaceBefore=12,
+        spaceAfter=6,
+        textColor=colors.HexColor("#111827"),
+    )
+    h3 = ParagraphStyle(
+        "CTH3",
+        parent=styles["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=11.5,
+        leading=14,
+        spaceBefore=10,
+        spaceAfter=4,
+        textColor=colors.HexColor("#111827"),
+    )
+    bullet_style = ParagraphStyle(
+        "CTBullet",
+        parent=body,
+        leftIndent=18,
+        firstLineIndent=-8,
+        spaceAfter=4,
+    )
+
+    def flush_paragraph(buf: list[str], out: list[Any]) -> None:
+        if not buf:
+            return
+        text = " ".join(s.strip() for s in buf).strip()
+        if text:
+            out.append(Paragraph(_md_inline_to_rl(text), body))
+        buf.clear()
+
+    out: list[Any] = []
+    lines = (markdown_text or "").splitlines()
+
+    paragraph_buf: list[str] = []
+    list_items: list[ListItem] = []
+
+    def flush_list() -> None:
+        nonlocal list_items
         if list_items:
-            blocks.append(ListFlowable(list_items, bulletType="bullet"))
+            out.append(ListFlowable(list_items, bulletType="bullet", leftIndent=14))
             list_items = []
-        if stripped.startswith("### "):
-            blocks.append(Paragraph(stripped.replace("### ", ""), heading))
-        elif stripped:
-            blocks.append(Paragraph(stripped, normal))
-    if list_items:
-        blocks.append(ListFlowable(list_items, bulletType="bullet"))
-    return blocks
+
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+
+        # blank line -> flush paragraph + list
+        if not stripped:
+            flush_paragraph(paragraph_buf, out)
+            flush_list()
+            continue
+
+        # heading?
+        m = _MD_HEADING_RE.match(stripped)
+        if m:
+            flush_paragraph(paragraph_buf, out)
+            flush_list()
+            level = len(m.group(1))
+            text = _md_inline_to_rl(m.group(2).strip())
+            if level <= 1:
+                out.append(Paragraph(text, h1))
+            elif level == 2:
+                out.append(Paragraph(text, h2))
+            else:
+                out.append(Paragraph(text, h3))
+            continue
+
+        # bullet?
+        mb = _MD_BULLET_RE.match(line)
+        if mb:
+            flush_paragraph(paragraph_buf, out)
+            indent_spaces = len(mb.group(1) or "")
+            item_text = _md_inline_to_rl(mb.group(3).strip())
+
+            # simple nesting by indent
+            left_indent = 18 + (indent_spaces // 2) * 10
+            nested_style = ParagraphStyle(
+                f"CTBullet_{left_indent}",
+                parent=bullet_style,
+                leftIndent=left_indent,
+            )
+            list_items.append(ListItem(Paragraph(item_text, nested_style)))
+            continue
+
+        # normal text -> accumulate into reflowed paragraph
+        paragraph_buf.append(stripped)
+
+    flush_paragraph(paragraph_buf, out)
+    flush_list()
+
+    return out
+
+
+def _draw_header_footer(canvas, doc):
+    canvas.saveState()
+    canvas.setFont("Helvetica", 9)
+    canvas.setFillColor(colors.HexColor("#6B7280"))
+
+    # Footer: page number
+    page_num = canvas.getPageNumber()
+    canvas.drawRightString(doc.pagesize[0] - doc.rightMargin, 0.55 * inch, f"Page {page_num}")
+
+    # Subtle footer line
+    canvas.setStrokeColor(colors.HexColor("#E5E7EB"))
+    canvas.setLineWidth(0.5)
+    canvas.line(doc.leftMargin, 0.75 * inch, doc.pagesize[0] - doc.rightMargin, 0.75 * inch)
+
+    canvas.restoreState()
+
+
+def _agent_header_card(agent: dict[str, Any]) -> Table:
+    """
+    A simple 'card' with agent label + focus.
+    """
+    label = agent.get("label", "Agent")
+    focus = agent.get("focus", "")
+
+    data = [
+        [Paragraph(f"<b>{_md_inline_to_rl(label)} Agent</b>", getSampleStyleSheet()["BodyText"]),
+         Paragraph(_md_inline_to_rl(focus), getSampleStyleSheet()["BodyText"])]
+    ]
+    t = Table(data, colWidths=[2.1 * inch, 4.9 * inch])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F3F4F6")),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#E5E7EB")),
+        ("INNERPADDING", (0, 0), (-1, -1), 10),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return t
 
 
 def _build_pdf(analysis: dict[str, Any]) -> bytes:
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=LETTER, title="Critical Thinking Analysis Report")
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=LETTER,
+        leftMargin=0.85 * inch,
+        rightMargin=0.85 * inch,
+        topMargin=0.9 * inch,
+        bottomMargin=0.9 * inch,
+        title="Critical Thinking Analysis Report",
+        author="Critical Thinker",
+    )
+
     styles = getSampleStyleSheet()
-    title_style = styles["Title"]
-    subtitle_style = styles["Italic"]
+    title_style = ParagraphStyle(
+        "CTTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=22,
+        leading=26,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=10,
+    )
+    subtitle_style = ParagraphStyle(
+        "CTSubtitle",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=11,
+        leading=14,
+        textColor=colors.HexColor("#374151"),
+        spaceAfter=18,
+    )
+    meta_style = ParagraphStyle(
+        "CTMeta",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=12,
+        textColor=colors.HexColor("#6B7280"),
+        spaceAfter=6,
+    )
 
-    story: list[Any] = [
-        Paragraph("Critical Thinking Analysis Report", title_style),
-        Paragraph(datetime.utcnow().strftime("Generated on %B %d, %Y"), subtitle_style),
-        Spacer(1, 18),
-    ]
+    story: list[Any] = []
 
-    for agent in AGENT_CONFIGS:
+    # --- Cover page ---
+    story.append(Paragraph("Critical Thinking Analysis Report", title_style))
+    story.append(Paragraph(datetime.utcnow().strftime("Generated on %B %d, %Y"), subtitle_style))
+
+    # quick index of sections
+    section_list = "<br/>".join([f"• {a.get('label','Agent')} Agent" for a in AGENT_CONFIGS])
+    story.append(Paragraph(f"<b>Sections</b><br/>{section_list}", meta_style))
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph(
+        "This report compiles independent analyses from multiple agents using Paul & Elder’s critical thinking framework. "
+        "Each section is self-contained and may be read independently.",
+        subtitle_style
+    ))
+
+    story.append(PageBreak())
+
+    # --- Agent sections ---
+    for idx, agent in enumerate(AGENT_CONFIGS):
         key = agent["key"]
-        block = analysis.get(key, {})
+        block = analysis.get(key, {}) if isinstance(analysis, dict) else {}
         content = block.get("content") or "Analysis unavailable."
-        story.append(Paragraph(f"{agent['label']} Agent", styles["Heading2"]))
-        story.append(Paragraph(agent["focus"].capitalize(), styles["BodyText"]))
-        story.append(Spacer(1, 8))
-        story.extend(_markdown_to_blocks(content))
-        story.append(Spacer(1, 18))
 
-    doc.build(story)
+        # section header card + divider
+        story.append(KeepTogether([
+            _agent_header_card(agent),
+            Spacer(1, 10),
+            HRFlowable(width="100%", thickness=0.7, color=colors.HexColor("#E5E7EB")),
+            Spacer(1, 10),
+        ]))
+
+        # render markdown nicely
+        story.extend(_markdown_to_flowables(content))
+
+        # page break between agents (but not after last)
+        if idx < len(AGENT_CONFIGS) - 1:
+            story.append(PageBreak())
+
+    doc.build(story, onFirstPage=_draw_header_footer, onLaterPages=_draw_header_footer)
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
