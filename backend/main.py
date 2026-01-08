@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 from reportlab.lib import colors
@@ -115,16 +115,24 @@ async def _run_agents(text: str) -> dict[str, Any]:
     return results
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/health")
+@app.get("/api/health")
 async def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
+@app.get("/api/_buildinfo")
+async def buildinfo():
+    return {
+        "file": __file__,
+        "cwd": os.getcwd(),
+        "FRONTEND_DIST": os.getenv("FRONTEND_DIST", "frontend_dist"),
+        "dist_resolved": str(dist_dir),
+        "index_exists": (dist_dir / "index.html").exists(),
+    }
 
+@app.head("/")
+async def head_root():
+    return Response(status_code=200)
+    
 # FIX 3: remove Body() from signature; manually parse JSON when needed
 @app.post("/api/analyze")
 async def analyze(
@@ -235,26 +243,32 @@ async def generate_pdf(payload: dict[str, Any]) -> StreamingResponse:
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
 
 dist_dir = Path(os.getenv("FRONTEND_DIST", "frontend_dist")).resolve()
+index_html = dist_dir / "index.html"
+assets_dir = dist_dir / "assets"
 
-if dist_dir.exists():
-    # Serve hashed JS/CSS assets from Vite (usually dist/assets)
-    assets_dir = dist_dir / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+if assets_dir.exists():
+    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-    @app.get("/")
-    async def spa_index():
-        return FileResponse(dist_dir / "index.html")
+@app.get("/", include_in_schema=False)
+async def spa_index():
+    if index_html.exists():
+        return FileResponse(index_html)
+    # If you still see JSON at / after this, you're not running this file.
+    return JSONResponse(
+        {"status": "ok", "note": "Frontend index.html not found", "FRONTEND_DIST": str(dist_dir)},
+        status_code=200,
+    )
 
-    # SPA fallback: serve file if it exists, else index.html
-    @app.get("/{full_path:path}")
-    async def spa_fallback(full_path: str, request: Request):
-        # Don't hijack API routes
-        if full_path.startswith("api/"):
-            return FileResponse(dist_dir / "index.html")  # or raise 404; depends on preference
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    if full_path == "api" or full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
 
-        candidate = dist_dir / full_path
-        if candidate.is_file():
-            return FileResponse(candidate)
+    candidate = dist_dir / full_path
+    if candidate.is_file():
+        return FileResponse(candidate)
 
-        return FileResponse(dist_dir / "index.html")
+    if index_html.exists():
+        return FileResponse(index_html)
+
+    raise HTTPException(status_code=404, detail="Not Found")
