@@ -58,6 +58,75 @@ def _extract_pdf_text(file_bytes: bytes) -> str:
         parts.append(page.extract_text() or "")
     return "\n".join(parts).strip()
 
+_BACK_MATTER_MARKERS = [
+    "references",
+    "bibliography",
+    "reference list",
+    "works cited",
+    "literature cited",
+    "citations",
+    "appendix",
+    "appendices",
+    "supplementary material",
+    "supplementary materials",
+    "supplement",
+    "acknowledgement",
+    "acknowledgements",
+]
+
+def _reduce_academic_pdf_text(text: str) -> str:
+    """
+    Heuristically remove common academic back-matter (References/Bibliography/Appendix/etc.)
+    to reduce token/character load before LLM analysis.
+
+    Heuristic safeguards:
+    - Only cut if the marker occurs after a threshold of the document (to avoid TOC hits).
+    - Prefer the earliest qualifying marker among candidates.
+    """
+    if not text:
+        return ""
+
+    t = text
+
+    # Normalize whitespace (helps pattern matching and reduces noise)
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+
+    lower = t.lower()
+    n = len(lower)
+    if n < 5000:
+        # very short docs: do not cut
+        return t
+
+    # Only consider cut points that appear in the latter part of the document.
+    # This avoids false positives from "References" in Table of Contents.
+    threshold = int(0.45 * n)
+
+    best_cut = None
+
+    # Look for headings on their own line: \nReferences\n, \nAppendix\n, etc.
+    for marker in _BACK_MATTER_MARKERS:
+        # Match marker as a standalone heading line (case-insensitive via lower)
+        # Examples matched:
+        #   "\nreferences\n"
+        #   "\nreferences:\n"
+        #   "\nappendix a\n"
+        pattern = re.compile(rf"\n{re.escape(marker)}(\b|[ :])")
+        m = pattern.search(lower)
+        if m:
+            cut_idx = m.start()
+            if cut_idx >= threshold:
+                if best_cut is None or cut_idx < best_cut:
+                    best_cut = cut_idx
+
+    if best_cut is not None:
+        t = t[:best_cut].strip()
+
+    # Final cleanup
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return t
+
 
 def _validate_text(text: str) -> str:
     cleaned = (text or "").strip()
@@ -160,6 +229,7 @@ async def analyze(
             extracted = _extract_pdf_text(file_bytes)
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Unable to read PDF text.") from exc
+        extracted = _reduce_academic_pdf_text(extracted)
         cleaned = _validate_text(extracted)
     else:
         # JSON path (frontend posts application/json) OR form field "text"
