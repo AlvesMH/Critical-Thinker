@@ -6,7 +6,6 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pypdf import PdfReader
@@ -15,20 +14,26 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
 
+# FIX 1: import prompts from the same directory (matches uploaded prompts.py)
 from app.prompts import AGENT_CONFIGS
 
 MAX_TEXT_CHARS = 100_000
 MAX_PDF_BYTES = 10 * 1024 * 1024
+
 DEFAULT_MODEL = os.getenv("GEMMA_MODEL", "Gemma-SEA-LION-v4-27B-IT")
-GEMMA_API_URL = os.getenv("GEMMA_API_URL", "")
-GEMMA_API_KEY = os.getenv("GEMMA_API_KEY", "")
+GEMMA_API_URL = os.getenv("GEMMA_API_URL", "").strip()
+GEMMA_API_KEY = os.getenv("GEMMA_API_KEY", "").strip()
 
 app = FastAPI(title="Critical Thinking Analysis API")
 
+# FIX 2: safer CORS defaults; do NOT combine allow_credentials=True with "*"
+cors_origins_raw = os.getenv("CORS_ORIGINS", "*")
+cors_origins = [o.strip() for o in cors_origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=False,  # important for "*" compatibility
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -36,11 +41,10 @@ app.add_middleware(
 
 def _extract_pdf_text(file_bytes: bytes) -> str:
     reader = PdfReader(io.BytesIO(file_bytes))
-    text_parts = []
+    parts: list[str] = []
     for page in reader.pages:
-        page_text = page.extract_text() or ""
-        text_parts.append(page_text)
-    return "\n".join(text_parts).strip()
+        parts.append(page.extract_text() or "")
+    return "\n".join(parts).strip()
 
 
 def _validate_text(text: str) -> str:
@@ -63,17 +67,28 @@ def _build_prompt(agent: dict[str, Any], text: str) -> list[dict[str, str]]:
 
 
 async def _call_model(client: httpx.AsyncClient, agent: dict[str, Any], text: str) -> str:
-    if not GEMMA_API_URL or not GEMMA_API_KEY:
-        raise RuntimeError("Model API configuration is missing.")
+    if not GEMMA_API_URL:
+        raise RuntimeError("GEMMA_API_URL is not set.")
+    if not GEMMA_API_KEY:
+        raise RuntimeError("GEMMA_API_KEY is not set.")
+
     payload = {
         "model": DEFAULT_MODEL,
         "messages": _build_prompt(agent, text),
         "temperature": 0.3,
     }
     headers = {"Authorization": f"Bearer {GEMMA_API_KEY}"}
-    response = await client.post(GEMMA_API_URL, json=payload, headers=headers, timeout=60)
-    response.raise_for_status()
-    data = response.json()
+
+    timeout = httpx.Timeout(120.0, connect=10.0)
+    try:
+        resp = await client.post(GEMMA_API_URL, json=payload, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(f"Model API returned HTTP {exc.response.status_code}.") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError("Could not reach the model API.") from exc
+
+    data = resp.json()
     if "choices" in data:
         return data["choices"][0]["message"]["content"].strip()
     if "generated_text" in data:
@@ -84,10 +99,9 @@ async def _call_model(client: httpx.AsyncClient, agent: dict[str, Any], text: st
 async def _run_agents(text: str) -> dict[str, Any]:
     results: dict[str, Any] = {}
     async with httpx.AsyncClient() as client:
-        tasks = []
-        for agent in AGENT_CONFIGS:
-            tasks.append(_call_model(client, agent, text))
+        tasks = [_call_model(client, agent, text) for agent in AGENT_CONFIGS]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
+
     for agent, response in zip(AGENT_CONFIGS, responses):
         if isinstance(response, Exception):
             results[agent["key"]] = {
@@ -109,12 +123,12 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# FIX 3: remove Body() from signature; manually parse JSON when needed
 @app.post("/analyze")
 async def analyze(
     request: Request,
     text: str | None = Form(None),
     file: UploadFile | None = File(None),
-    payload: dict[str, Any] | None = Body(None),
 ) -> JSONResponse:
     if file is not None:
         if file.content_type != "application/pdf":
@@ -128,18 +142,22 @@ async def analyze(
             raise HTTPException(status_code=400, detail="Unable to read PDF text.") from exc
         cleaned = _validate_text(extracted)
     else:
-        if text is None and request.headers.get("content-type", "").startswith("application/json"):
-            payload = await request.json()
-            if isinstance(payload, dict):
-                text = payload.get("text")
-        if payload and isinstance(payload, dict) and "text" in payload:
-            text = payload.get("text")
+        # JSON path (frontend posts application/json) OR form field "text"
+        content_type = request.headers.get("content-type", "")
+        if text is None and content_type.startswith("application/json"):
+            try:
+                body = await request.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict):
+                text = body.get("text")
+
         if text is None:
             raise HTTPException(status_code=400, detail="Provide text or upload a PDF.")
         cleaned = _validate_text(text)
 
     results = await _run_agents(cleaned)
-    if all(value["status"] == "error" for value in results.values()):
+    if all(v.get("status") == "error" for v in results.values()):
         raise HTTPException(status_code=502, detail="Analysis failed. Please try again later.")
     return JSONResponse({"analysis": results})
 
@@ -158,7 +176,7 @@ def _markdown_to_blocks(markdown_text: str) -> list[Any]:
 
     blocks: list[Any] = []
     lines = markdown_text.splitlines()
-    list_items = []
+    list_items: list[Any] = []
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("-"):
