@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pypdf import PdfReader
@@ -113,6 +114,9 @@ async def analyze(
     request: Request,
     text: str | None = Form(None),
     file: UploadFile | None = File(None),
+    text: str | None = Form(None),
+    file: UploadFile | None = File(None),
+    payload: dict[str, Any] | None = Body(None),
 ) -> JSONResponse:
     if file is not None:
         if file.content_type != "application/pdf":
@@ -130,6 +134,8 @@ async def analyze(
             payload = await request.json()
             if isinstance(payload, dict):
                 text = payload.get("text")
+        if payload and isinstance(payload, dict) and "text" in payload:
+            text = payload.get("text")
         if text is None:
             raise HTTPException(status_code=400, detail="Provide text or upload a PDF.")
         cleaned = _validate_text(text)
