@@ -29,7 +29,7 @@ from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTempl
 # FIX 1: import prompts from the same directory (matches uploaded prompts.py)
 from backend.app.prompts import AGENT_CONFIGS
 
-MAX_TEXT_CHARS = 100_000
+MAX_TEXT_CHARS = 200_000
 MAX_PDF_BYTES = 10 * 1024 * 1024
 
 DEFAULT_MODEL = os.getenv("GEMMA_MODEL", "aisingapore/Gemma-SEA-LION-v4-27B-IT")
