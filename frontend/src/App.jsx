@@ -8,7 +8,7 @@ const AGENTS = [
   { key: 'ethics', label: 'Ethics', description: 'Rights & justice' }
 ]
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '')
+const API_PREFIX = '/api'
 
 const EXAMPLE_TEXT = `Policies that accelerate renewable energy adoption are essential to economic stability.\n\nGovernments should mandate a rapid transition to clean power within 10 years. This will reduce long-term energy costs, create green jobs, and protect public health. Fossil fuels impose hidden costs through pollution and climate damage. While the transition is expensive upfront, the benefits outweigh the costs for future generations.`
 
@@ -43,12 +43,12 @@ export default function App() {
       if (mode === 'pdf' && fileValue) {
         const formData = new FormData()
         formData.append('file', fileValue)
-        response = await fetch(`${API_BASE_URL}/analyze`, {
+        response = await fetch(`${API_PREFIX}/analyze`, {
           method: 'POST',
           body: formData
         })
       } else {
-        response = await fetch(`${API_BASE_URL}/analyze`, {
+        response = await fetch(`${API_PREFIX}/analyze`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: textValue })
@@ -75,7 +75,7 @@ export default function App() {
     if (!analysis) return
     setDownloadLoading(true)
     try {
-      const response = await fetch(`${API_BASE_URL}/generate-pdf`, {
+      const response = await fetch(`${API_PREFIX}/generate-pdf`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ analysis })

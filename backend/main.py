@@ -3,11 +3,13 @@ import io
 import os
 from datetime import datetime
 from typing import Any
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import LETTER
@@ -20,7 +22,7 @@ from app.prompts import AGENT_CONFIGS
 MAX_TEXT_CHARS = 100_000
 MAX_PDF_BYTES = 10 * 1024 * 1024
 
-DEFAULT_MODEL = os.getenv("GEMMA_MODEL", "Gemma-SEA-LION-v4-27B-IT")
+DEFAULT_MODEL = os.getenv("GEMMA_MODEL", "aisingapore/Gemma-SEA-LION-v4-27B-IT")
 GEMMA_API_URL = os.getenv("GEMMA_API_URL", "").strip()
 GEMMA_API_KEY = os.getenv("GEMMA_API_KEY", "").strip()
 
@@ -124,7 +126,7 @@ async def health_check() -> dict[str, str]:
 
 
 # FIX 3: remove Body() from signature; manually parse JSON when needed
-@app.post("/analyze")
+@app.post("/api/analyze")
 async def analyze(
     request: Request,
     text: str | None = Form(None),
@@ -223,7 +225,7 @@ def _build_pdf(analysis: dict[str, Any]) -> bytes:
     return pdf_bytes
 
 
-@app.post("/generate-pdf")
+@app.post("/api/generate-pdf")
 async def generate_pdf(payload: dict[str, Any]) -> StreamingResponse:
     analysis = payload.get("analysis") if isinstance(payload, dict) else None
     if not isinstance(analysis, dict):
@@ -231,3 +233,28 @@ async def generate_pdf(payload: dict[str, Any]) -> StreamingResponse:
     pdf_bytes = _build_pdf(analysis)
     headers = {"Content-Disposition": "attachment; filename=CriticalThinkingReport.pdf"}
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
+
+dist_dir = Path(os.getenv("FRONTEND_DIST", "frontend_dist")).resolve()
+
+if dist_dir.exists():
+    # Serve hashed JS/CSS assets from Vite (usually dist/assets)
+    assets_dir = dist_dir / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/")
+    async def spa_index():
+        return FileResponse(dist_dir / "index.html")
+
+    # SPA fallback: serve file if it exists, else index.html
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str, request: Request):
+        # Don't hijack API routes
+        if full_path.startswith("api/"):
+            return FileResponse(dist_dir / "index.html")  # or raise 404; depends on preference
+
+        candidate = dist_dir / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+
+        return FileResponse(dist_dir / "index.html")
