@@ -21,6 +21,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [downloadLoading, setDownloadLoading] = useState(false)
+  const [answerLength, setAnswerLength] = useState('long')
 
   const isReadyToAnalyze = useMemo(() => {
     if (mode === 'text') {
@@ -43,6 +44,7 @@ export default function App() {
       if (mode === 'pdf' && fileValue) {
         const formData = new FormData()
         formData.append('file', fileValue)
+        formData.append('answer_length', answerLength)
         response = await fetch(`${API_PREFIX}/analyze`, {
           method: 'POST',
           body: formData
@@ -51,7 +53,7 @@ export default function App() {
         response = await fetch(`${API_PREFIX}/analyze`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: textValue })
+          body: JSON.stringify({ text: textValue, answer_length: answerLength })
         })
       }
 
@@ -62,6 +64,7 @@ export default function App() {
 
       const data = await response.json()
       setAnalysis(data.analysis)
+      if (data?.meta?.answer_length) setAnswerLength(data.meta.answer_length)
       setSelectedAgent('science')
       document.getElementById('results').scrollIntoView({ behavior: 'smooth' })
     } catch (err) {
@@ -78,7 +81,7 @@ export default function App() {
       const response = await fetch(`${API_PREFIX}/generate-pdf`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ analysis })
+        body: JSON.stringify({ analysis, answer_length: answerLength })
       })
       if (!response.ok) {
         throw new Error('Failed to generate PDF report.')
@@ -150,6 +153,25 @@ export default function App() {
               </button>
             </div>
           </div>
+          <div className="mode-toggle" role="group" aria-label="Answer length">
+            <button
+              type="button"
+              className={answerLength === 'long' ? 'active' : ''}
+              onClick={() => setAnswerLength('long')}
+              aria-pressed={answerLength === 'long'}
+            >
+              Long Answer
+            </button>
+            <button
+              type="button"
+              className={answerLength === 'short' ? 'active' : ''}
+              onClick={() => setAnswerLength('short')}
+              aria-pressed={answerLength === 'short'}
+            >
+              Short Answer
+            </button>
+          </div>
+
 
           {mode === 'text' ? (
             <div className="input-group">
@@ -219,7 +241,7 @@ export default function App() {
               onClick={handleDownload}
               disabled={!analysis || downloadLoading}
             >
-              {downloadLoading ? 'Preparing PDF…' : 'Download full report'}
+              {downloadLoading ? 'Preparing PDF…' : 'Download report'}
             </button>
           </div>
 

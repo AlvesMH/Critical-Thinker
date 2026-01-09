@@ -28,6 +28,7 @@ from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTempl
 
 # FIX 1: import prompts from the same directory (matches uploaded prompts.py)
 from backend.app.prompts import AGENT_CONFIGS
+from backend.app.prompts_short import AGENT_CONFIGS_SHORT
 
 MAX_TEXT_CHARS = 200_000
 MAX_PDF_BYTES = 10 * 1024 * 1024
@@ -177,17 +178,17 @@ async def _call_model(client: httpx.AsyncClient, agent: dict[str, Any], text: st
     raise RuntimeError("Unexpected response from model API.")
 
 
-async def _run_agents(text: str) -> dict[str, Any]:
+async def _run_agents(text: str, agent_configs: list[dict[str, Any]]) -> dict[str, Any]:
     results: dict[str, Any] = {}
     async with httpx.AsyncClient() as client:
-        tasks = [_call_model(client, agent, text) for agent in AGENT_CONFIGS]
+        tasks = [_call_model(client, agent, text) for agent in agent_configs]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for agent, response in zip(AGENT_CONFIGS, responses):
+    for agent, response in zip(agent_configs, responses):
         if isinstance(response, Exception):
             results[agent["key"]] = {
                 "status": "error",
-                "message": "Analysis could not be generated. Please try again.",
+                "message": str(response),
             }
         else:
             results[agent["key"]] = {"status": "ok", "content": response}
@@ -218,7 +219,9 @@ async def analyze(
     request: Request,
     text: str | None = Form(None),
     file: UploadFile | None = File(None),
+    answer_length: str | None = Form(None),
 ) -> JSONResponse:
+
     if file is not None:
         if file.content_type != "application/pdf":
             raise HTTPException(status_code=400, detail="Only PDF uploads are supported.")
@@ -241,15 +244,24 @@ async def analyze(
                 body = None
             if isinstance(body, dict):
                 text = body.get("text")
+                if answer_length is None:
+                    answer_length = body.get("answer_length")
+
 
         if text is None:
             raise HTTPException(status_code=400, detail="Provide text or upload a PDF.")
         cleaned = _validate_text(text)
 
-    results = await _run_agents(cleaned)
+    answer_length_normalized = (answer_length or "long").strip().lower()
+    if answer_length_normalized not in {"short", "long"}:
+        raise HTTPException(status_code=400, detail="answer_length must be 'short' or 'long'.")
+
+    agent_configs = AGENT_CONFIGS_SHORT if answer_length_normalized == "short" else AGENT_CONFIGS
+    results = await _run_agents(cleaned, agent_configs)
+
     if all(v.get("status") == "error" for v in results.values()):
         raise HTTPException(status_code=502, detail="Analysis failed. Please try again later.")
-    return JSONResponse({"analysis": results})
+    return JSONResponse({"analysis": results, "meta": {"answer_length": answer_length_normalized}})
 
 
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -446,7 +458,7 @@ def _agent_header_card(agent: dict[str, Any]) -> Table:
     return t
 
 
-def _build_pdf(analysis: dict[str, Any]) -> bytes:
+def _build_pdf(analysis: dict[str, Any], agent_configs: list[dict[str, Any]]) -> bytes:
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
@@ -496,7 +508,7 @@ def _build_pdf(analysis: dict[str, Any]) -> bytes:
     story.append(Paragraph(datetime.utcnow().strftime("Generated on %B %d, %Y"), subtitle_style))
 
     # quick index of sections
-    section_list = "<br/>".join([f"• {a.get('label','Agent')} Agent" for a in AGENT_CONFIGS])
+    section_list = "<br/>".join([f"• {a.get('label','Agent')} Agent" for a in agent_configs])
     story.append(Paragraph(f"<b>Sections</b><br/>{section_list}", meta_style))
 
     story.append(Spacer(1, 16))
@@ -509,7 +521,7 @@ def _build_pdf(analysis: dict[str, Any]) -> bytes:
     story.append(PageBreak())
 
     # --- Agent sections ---
-    for idx, agent in enumerate(AGENT_CONFIGS):
+    for idx, agent in enumerate(agent_configs):
         key = agent["key"]
         block = analysis.get(key, {}) if isinstance(analysis, dict) else {}
         content = block.get("content") or "Analysis unavailable."
@@ -526,7 +538,7 @@ def _build_pdf(analysis: dict[str, Any]) -> bytes:
         story.extend(_markdown_to_flowables(content))
 
         # page break between agents (but not after last)
-        if idx < len(AGENT_CONFIGS) - 1:
+        if idx < len(agent_configs) - 1:
             story.append(PageBreak())
 
     doc.build(story, onFirstPage=_draw_header_footer, onLaterPages=_draw_header_footer)
@@ -540,7 +552,14 @@ async def generate_pdf(payload: dict[str, Any]) -> StreamingResponse:
     analysis = payload.get("analysis") if isinstance(payload, dict) else None
     if not isinstance(analysis, dict):
         raise HTTPException(status_code=400, detail="Analysis data missing.")
-    pdf_bytes = _build_pdf(analysis)
+
+    answer_length_normalized = str(payload.get("answer_length") or "long").strip().lower()
+    if answer_length_normalized not in {"short", "long"}:
+        answer_length_normalized = "long"
+
+    agent_configs = AGENT_CONFIGS_SHORT if answer_length_normalized == "short" else AGENT_CONFIGS
+    pdf_bytes = _build_pdf(analysis, agent_configs)
+    
     headers = {"Content-Disposition": "attachment; filename=CriticalThinkingReport.pdf"}
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers=headers)
 
