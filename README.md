@@ -8,6 +8,16 @@ The design principle is intentionally pedagogical and method-driven: the app is 
 
 ---
 
+<table style="border:2px solid red; border-collapse:collapse;">
+  <tr>
+    <td style="border:2px solid red; text-align:center; vertical-align:middle;"><img src="img/critical-thinker.jpg" alt="critical-thinker" style="width:100%; border:2px solid red;"></td>
+    <td style="border:2px solid red; text-align:center; vertical-align:middle;"><img src="img/critical-thinker_mobile.jpg" alt="critical-thinker_mobile" style="width:100%; border:2px solid red;"></td>
+  
+  </tr>
+</table>  
+
+---
+
 ## Pedagogical Purpose
 
 Critical thinking is often taught as a general skill but applied inconsistently. This app addresses a common instructional and research challenge: learners and analysts may *recognize* that an argument is weak, but struggle to pinpoint *where* it fails (e.g., unclear question at issue, missing evidence, unjustified inference, narrow point of view), or *which standard* the reasoning violates (e.g., imprecision, lack of depth, unfairness).
